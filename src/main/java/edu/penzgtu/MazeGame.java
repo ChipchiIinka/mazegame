@@ -1,5 +1,13 @@
 package edu.penzgtu;
 
+import edu.penzgtu.model.Agent;
+import edu.penzgtu.model.LeaderboardEntry;
+import edu.penzgtu.model.Obstacle;
+import edu.penzgtu.util.MazeGenerator;
+import edu.penzgtu.util.Pathfinding;
+import edu.penzgtu.view.ControlPanel;
+import edu.penzgtu.view.MazePanel;
+
 import javax.swing.*;
 import javax.swing.Timer;
 import java.awt.*;
@@ -11,337 +19,302 @@ public class MazeGame extends JFrame {
     private static final int SIZE = 32;
     private static final int CELL_SIZE = 20;
     private static final int MAX_STEPS = 200;
-    private static final int MIN_STEPS = 70;
-    private static final int MAX_PATH_LENGTH = 150;
-    private static final int MAX_ATTEMPTS = 1000;
-    private static final int NUM_OBSTACLES = 8;
-    private static final int OBSTACLE_CYCLE = 4;
+
+    private static final int STATE_YELLOW = 0;
+    private static final int STATE_ORANGE = 1;
+    private static final int STATE_RED = 2;
+    private static final int CYCLE_LENGTH = 4;
+
     private final char[][] maze;
     private final Agent agent;
     private final List<Obstacle> obstacles = new CopyOnWriteArrayList<>();
-    private int stepCount;
-    private int generation;
+
+    private int stepCount = 0;
+    private int generation = 1;
+    private int wins = 0;
+    private int time = 0;
+
     private final JLabel stepLabel;
     private final JLabel goalLabel;
     private final JLabel generationLabel;
+    private final JTextArea leaderboardArea;
+    private final List<LeaderboardEntry> leaderboard = new ArrayList<>();
+
     private final Timer timer;
-    private boolean isSimulationRunning;
-    private final List<Point> pathHistory;
-    private boolean justTurned;
-    private int time;
+    private boolean isSimulationRunning = false;
+
+    private final List<Point> pathHistory = new ArrayList<>();
+    private final Map<Integer, Set<Point>> deadEndRepeats = new HashMap<>();
+    private final Set<Point> deathPoints = new HashSet<>();
+    private boolean justTurned = false;
+    private final Map<Point, Integer> deathByTimeoutPoints = new HashMap<>();
+    private final Set<Point> forbiddenPoints = new HashSet<>();
 
     public MazeGame() {
-        setTitle("Maze with Dynamic Obstacles");
-        setSize(SIZE * CELL_SIZE + 50, SIZE * CELL_SIZE + 150);
-        setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+        setTitle("Лабиринт с динамическими препятствиями");
+        setSize(SIZE * CELL_SIZE + 50, SIZE * CELL_SIZE + 250);
+        setDefaultCloseOperation(EXIT_ON_CLOSE);
         setLocationRelativeTo(null);
 
-        maze = generateValidMaze();
+        MazeGenerator gen = new MazeGenerator();
+        maze = gen.generateValidMaze();
+        if (maze == null) throw new RuntimeException("Не удалось сгенерировать валидный лабиринт");
 
         agent = new Agent(30, 1, 1);
-        stepCount = 0;
-        generation = 0;
-        time = 0;
-        pathHistory = new ArrayList<>();
-        justTurned = false;
+        obstacles.addAll(gen.getObstacles());
 
-        JPanel controlPanel = new JPanel();
-        JButton stepButton = new JButton("Сделать шаг");
-        JButton runButton = new JButton("Запустить/Остановить");
-        stepLabel = new JLabel("Пройденных шагов: 0");
-        goalLabel = new JLabel("Цель: Не достигнута");
-        generationLabel = new JLabel("Поколение: " + generation);
+        ControlPanel ctrl = new ControlPanel(this::performStep, this::toggleSimulation);
+        stepLabel = ctrl.getStepLabel();
+        goalLabel = ctrl.getGoalLabel();
+        generationLabel = ctrl.getGenerationLabel();
+        leaderboardArea = ctrl.getLeaderboardArea();
 
-        stepButton.addActionListener(e -> performStep());
-        runButton.addActionListener(e -> toggleSimulation());
-
-        controlPanel.add(stepButton);
-        controlPanel.add(runButton);
-        controlPanel.add(stepLabel);
-        controlPanel.add(goalLabel);
-        controlPanel.add(generationLabel);
-
-        add(controlPanel, BorderLayout.SOUTH);
-        add(new MazePanel(), BorderLayout.CENTER);
+        add(ctrl, BorderLayout.SOUTH);
+        add(new MazePanel(maze, agent), BorderLayout.CENTER);
 
         timer = new Timer(100, e -> performStep());
-    }
 
-    private char[][] generateValidMaze() {
-        Random rand = new Random(42);
-        int attempt = 0;
-        while (true) {
-            attempt++;
-            char[][] maze = generateMaze(rand);
-            List<Point> pathWithoutObstacles = aStarPathfinding(maze);
-            if (!isValidMaze(pathWithoutObstacles)) {
-                System.out.println("Attempt " + attempt + ": Invalid maze without obstacles (no path or invalid length)");
-                continue;
-            }
-            char[][] mazeWithObstacles = addDynamicObstacles(maze, rand);
-            List<Point> path = aStarPathfinding(mazeWithObstacles);
-            if (isValidMaze(path)) {
-                System.out.println("Valid maze generated on attempt " + attempt + ", path length: " + getPathLengthWithTurns(path));
-                return mazeWithObstacles;
-            }
-            System.out.println("Attempt " + attempt + ": Invalid maze with obstacles (no path or invalid length)");
-            if (attempt >= MAX_ATTEMPTS) {
-                System.out.println("Reached maximum attempts (" + MAX_ATTEMPTS + "), retrying with new seed");
-                rand = new Random();
-                attempt = 0;
-            }
-        }
-    }
-
-    private char[][] generateMaze(Random rand) {
-        char[][] maze = new char[SIZE][SIZE];
-        for (int i = 0; i < SIZE; i++) {
-            for (int j = 0; j < SIZE; j++) {
-                maze[i][j] = '#';
-            }
-        }
-        Stack<Point> stack = new Stack<>();
-        maze[1][1] = '.';
-        stack.push(new Point(1, 1));
-
-        int[][] directions = {{0, 2}, {2, 0}, {0, -2}, {-2, 0}};
-        int maxDepth = 100;
-        int depth = 0;
-        while (!stack.isEmpty() && depth < maxDepth) {
-            Point current = stack.peek();
-            int x = current.x;
-            int y = current.y;
-            List<int[]> shuffledDirections = new ArrayList<>(Arrays.asList(directions));
-            Collections.shuffle(shuffledDirections, rand);
-            boolean moved = false;
-
-            for (int[] dir : shuffledDirections) {
-                int nx = x + dir[0];
-                int ny = y + dir[1];
-                if (nx > 0 && nx < SIZE - 1 && ny > 0 && ny < SIZE - 1 && maze[ny][nx] == '#') {
-                    maze[ny][nx] = '.';
-                    maze[y + dir[1]/2][x + dir[0]/2] = '.';
-                    stack.push(new Point(nx, ny));
-                    moved = true;
-                    depth++;
-                    break;
-                }
-            }
-            if (!moved) stack.pop();
-        }
-
-        maze[1][30] = '.';
-        maze[30][1] = 'G';
-        maze[1][29] = '.';
-        maze[29][1] = '.';
-        return maze;
-    }
-
-    private char[][] addDynamicObstacles(char[][] maze, Random rand) {
-        char[][] mazeWithObstacles = new char[SIZE][SIZE];
-        for (int i = 0; i < maze.length; i++) {
-            mazeWithObstacles[i] = maze[i].clone();
-        }
-        List<Point> obstaclesList = new ArrayList<>();
-        obstacles.clear();
-        int attempts = 0;
-        while (obstaclesList.size() < NUM_OBSTACLES && attempts < 100) {
-            int x = rand.nextInt(SIZE);
-            int y = rand.nextInt(SIZE);
-            if (mazeWithObstacles[y][x] == '.' && !(x == 30 && y == 1) && !(x == 1 && y == 30)) {
-                mazeWithObstacles[y][x] = 'O';
-                List<Point> path = aStarPathfinding(mazeWithObstacles);
-                if (isValidMaze(path)) {
-                    obstaclesList.add(new Point(x, y));
-                } else {
-                    mazeWithObstacles[y][x] = '.';
-                }
-            }
-            attempts++;
-        }
-        for (Point p : obstaclesList) {
-            obstacles.add(new Obstacle(p.x, p.y, 0, 0));
-        }
-        return mazeWithObstacles;
-    }
-
-    private List<Point> aStarPathfinding(char[][] maze) {
-        PriorityQueue<Node> openSet = new PriorityQueue<>(Comparator.comparingInt(n -> n.fScore));
-        Set<String> closed = new HashSet<>();
-        Point start = new Point(30, 1);
-        Point goal = new Point(1, 30);
-        openSet.add(new Node(0, 0, start, new ArrayList<>()));
-
-        int[][] directions = {{0, 1}, {1, 0}, {0, -1}, {-1, 0}};
-        while (!openSet.isEmpty()) {
-            Node currentNode = openSet.poll();
-            Point current = currentNode.pos;
-            int time = currentNode.time;
-            List<Point> path = currentNode.path;
-
-            if (current.equals(goal)) {
-                path.add(current);
-                return path;
-            }
-
-            int timeCycle = time % OBSTACLE_CYCLE;
-            String state = current.x + "," + current.y + "," + timeCycle;
-            if (closed.contains(state)) continue;
-            closed.add(state);
-
-            for (int[] dir : directions) {
-                int nx = current.x + dir[0];
-                int ny = current.y + dir[1];
-                if (nx >= 0 && nx < SIZE && ny >= 0 && ny < SIZE && isObstacleFree(maze, nx, ny, time + 1)) {
-                    List<Point> newPath = new ArrayList<>(path);
-                    newPath.add(current);
-                    int gScore = newPath.size();
-                    int hScore = Math.abs(nx - goal.x) + Math.abs(ny - goal.y);
-                    int fScore = gScore + hScore;
-                    openSet.add(new Node(fScore, time + 1, new Point(nx, ny), newPath));
-                }
-            }
-        }
-        return null;
-    }
-
-    private boolean isObstacleFree(char[][] maze, int x, int y, int time) {
-        if (x < 0 || x >= SIZE || y < 0 || y >= SIZE) return false;
-        if (maze[y][x] != 'O') return maze[y][x] == '.' || maze[y][x] == 'G';
-        return (time % OBSTACLE_CYCLE) < (OBSTACLE_CYCLE / 2);
-    }
-
-    private boolean isValidMaze(List<Point> path) {
-        if (path == null || path.size() < 2) return false;
-        int steps = getPathLengthWithTurns(path);
-        return steps >= MIN_STEPS && steps <= MAX_PATH_LENGTH; // Updated to 150
-    }
-
-    private int getPathLengthWithTurns(List<Point> path) {
-        if (path.size() < 2) return 0;
-        int steps = path.size() - 1;
-        int turns = 0;
-        int currentDirection = 1; // Down
-        for (int i = 1; i < path.size() - 1; i++) {
-            Point curr = path.get(i);
-            Point next = path.get(i + 1);
-            int dx = next.x - curr.x;
-            int dy = next.y - curr.y;
-            int newDirection;
-            if (dx == 1) newDirection = 0;
-            else if (dx == -1) newDirection = 2;
-            else if (dy == 1) newDirection = 1;
-            else newDirection = 3;
-            if (newDirection != currentDirection) turns++;
-            currentDirection = newDirection;
-        }
-        return steps + turns;
+        updateWinPercentage();
     }
 
     private void performStep() {
+        if (!isValidPosition(agent.x, agent.y)) {
+            advanceGeneration();
+            return;
+        }
+
+        int currState = getObstacleState(agent.x, agent.y, time);
+        if (currState == STATE_RED) {
+            deathPoints.add(new Point(agent.x, agent.y));
+            advanceGeneration();
+            return;
+        }
+
         if (stepCount >= MAX_STEPS) {
-            resetAgent();
-            generation++;
-            generationLabel.setText("Поколение: " + generation);
-            stepCount = 0;
-            time = 0;
-            pathHistory.clear();
-            stepLabel.setText("Пройденных шагов: " + stepCount);
+            advanceGeneration();
             return;
         }
 
         if (isGoalReached()) {
-            timer.stop();
-            isSimulationRunning = false;
-            goalLabel.setText("Цель: Достигнута");
+            advanceGeneration(true);
             return;
         }
 
-        Point frontCell = getFrontCell();
-        char frontContent = getCellContent(frontCell.x, frontCell.y, time);
-
-        if (frontContent == 'G') {
-            moveForward();
-            justTurned = false;
-            completeStep();
-            return;
+        Point here = new Point(agent.x, agent.y);
+        if (!justTurned && (pathHistory.isEmpty() || !pathHistory.get(pathHistory.size() - 1).equals(here))) {
+            pathHistory.add(here);
         }
-        if (frontContent == 'O') {
-            turnLeft();
+
+        Point front = getFrontCell();
+        Point right = getRightCell();
+
+        if (isWallOrBlocked(front)) {
+            if (isWallOrBlocked(right)) {
+                int attempts = 0;
+                while (isWallOrBlocked(getFrontCell()) && attempts < 4) {
+                    turnLeft();
+                    attempts++;
+                }
+                if (attempts >= 4) {
+                    advanceGeneration();
+                    return;
+                }
+            } else {
+                turnRight();
+            }
             justTurned = true;
             completeStep();
             return;
         }
-        if (frontContent == '#') {
+
+        int frontState = getObstacleState(front.x, front.y, time);
+        if (frontState != -1) {
+            if (frontState == STATE_YELLOW) {
+                agent.x = front.x;
+                agent.y = front.y;
+                justTurned = false;
+            } else {
+                justTurned = true;
+            }
+            completeStep();
+            return;
+        }
+
+        if (shouldAvoid(front) || deathPoints.contains(front)) {
             turnRight();
             justTurned = true;
-            frontCell = getFrontCell();
-            frontContent = getCellContent(frontCell.x, frontCell.y, time);
-            int maxTurns = 3;
-            while (frontContent == '#' && maxTurns > 0) {
-                turnLeft();
-                frontCell = getFrontCell();
-                frontContent = getCellContent(frontCell.x, frontCell.y, time);
-                maxTurns--;
-            }
             completeStep();
             return;
         }
-        if (frontContent == '.') {
-            moveForward();
-            justTurned = false;
-        }
 
-        if (!justTurned) {
-            Point rightCell = getRightCell();
-            char rightContent = getCellContent(rightCell.x, rightCell.y, time);
-            if (rightContent == '.' || rightContent == 'G') {
-                turnRight();
-                justTurned = true;
+        char content = Pathfinding.getCellContent(maze, front.x, front.y, time);
+        switch (content) {
+            case 'G':
+                agent.x = front.x;
+                agent.y = front.y;
+                justTurned = false;
                 completeStep();
-                return;
+                break;
+            case '.':
+                agent.x = front.x;
+                agent.y = front.y;
+                justTurned = false;
+
+                right = getRightCell();
+                if (isValidPosition(right.x, right.y)) {
+                    char rc = Pathfinding.getCellContent(maze, right.x, right.y, time);
+                    if ((rc == '.' || rc == 'G') && !shouldAvoid(right) && !deathPoints.contains(right)) {
+                        turnRight();
+                        justTurned = true;
+                    }
+                }
+                completeStep();
+                break;
+            default:
+                completeStep();
+        }
+    }
+
+    private boolean shouldAvoid(Point p) {
+        if (forbiddenPoints.contains(p)) return true;
+        for (Map.Entry<Integer, Set<Point>> e : deadEndRepeats.entrySet()) {
+            if (e.getKey() >= generation) continue;
+            if (e.getValue().contains(p)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean isWallOrBlocked(Point p) {
+        if (!isValidPosition(p.x, p.y)) return true;
+        char c = maze[p.y][p.x];
+        return c == '#' || shouldAvoid(p) || deathPoints.contains(p);
+    }
+
+    private boolean isValidPosition(int x, int y) {
+        return x >= 0 && x < SIZE && y >= 0 && y < SIZE;
+    }
+
+    private void advanceGeneration() {
+        advanceGeneration(false);
+    }
+
+    private void advanceGeneration(boolean won) {
+        if (!won && stepCount >= MAX_STEPS) {
+            Point deathPoint = new Point(agent.x, agent.y);
+            deathByTimeoutPoints.merge(deathPoint, 1, Integer::sum);
+            if (deathByTimeoutPoints.get(deathPoint) >= 3) {
+                addForbiddenArea(deathPoint);
             }
         }
 
-        completeStep();
+        if (won) {
+            wins++;
+            boolean alreadyExists = leaderboard.stream()
+                    .anyMatch(entry -> entry.steps() == stepCount);
+
+            if (!alreadyExists) {
+                leaderboard.add(new LeaderboardEntry(generation, stepCount));
+                updateLeaderboard();
+            }
+        }
+
+        recordDeadEnds();
+        generation++;
+        resetForNext();
+        updateWinPercentage();
+    }
+
+    private void addForbiddenArea(Point center) {
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dy = -1; dy <= 1; dy++) {
+                int newX = center.x + dx;
+                int newY = center.y + dy;
+                if (isValidPosition(newX, newY)) {
+                    forbiddenPoints.add(new Point(newX, newY));
+                }
+            }
+        }
+    }
+
+    private void updateLeaderboard() {
+        leaderboard.sort(Comparator.comparingInt(LeaderboardEntry::steps));
+        StringBuilder sb = new StringBuilder();
+        sb.append("Таблица лидеров:\n");
+        for (LeaderboardEntry entry : leaderboard) {
+            sb.append("Поколение: ").append(entry.generation()).append(" - Шаги: ").append(entry.steps()).append("\n");
+        }
+        leaderboardArea.setText(sb.toString());
+    }
+
+
+    private int getObstacleState(int x, int y, int t) {
+        for (Obstacle o : obstacles) {
+            if (o.getX() == x && o.getY() == y) {
+                int cycle = t % CYCLE_LENGTH;
+                if (cycle < 2) return STATE_YELLOW;
+                if (cycle == 2) return STATE_ORANGE;
+                return STATE_RED;
+            }
+        }
+        return -1;
+    }
+
+    private void recordDeadEnds() {
+        if (deadEndRepeats.containsKey(generation)) return;
+        Set<Point> repeats = new HashSet<>();
+        Map<Point, Integer> counts = new HashMap<>();
+
+        for (Point p : pathHistory) {
+            int count = counts.getOrDefault(p, 0) + 1;
+            counts.put(p, count);
+            if (count >= 2) {
+                repeats.add(p);
+            }
+        }
+
+        if (!repeats.isEmpty()) {
+            deadEndRepeats.put(generation, repeats);
+        }
+    }
+
+    private void resetForNext() {
+        generationLabel.setText("Поколение: " + generation);
+        stepCount = time = 0;
+        stepLabel.setText("Пройденных шагов: 0");
+        resetAgent();
+        pathHistory.clear();
+        justTurned = false;
+        deathPoints.clear();
+    }
+
+    private void updateWinPercentage() {
+        int completedGenerations = generation - 1;
+        if (completedGenerations != 0) {
+            double percentage = (double) wins / completedGenerations * 100.0;
+            goalLabel.setText(String.format("Процент побед: %.2f%%", percentage));
+        }
     }
 
     private Point getFrontCell() {
-        int x = agent.x;
-        int y = agent.y;
         return switch (agent.direction) {
-            case 0 -> new Point(x, y - 1); // Up
-            case 1 -> new Point(x + 1, y); // Right
-            case 2 -> new Point(x, y + 1); // Down
-            case 3 -> new Point(x - 1, y); // Left
-            default -> new Point(x, y);
+            case 0 -> new Point(agent.x, agent.y - 1);
+            case 1 -> new Point(agent.x + 1, agent.y);
+            case 2 -> new Point(agent.x, agent.y + 1);
+            case 3 -> new Point(agent.x - 1, agent.y);
+            default -> new Point(agent.x, agent.y);
         };
     }
 
     private Point getRightCell() {
-        int x = agent.x;
-        int y = agent.y;
         return switch (agent.direction) {
-            case 0 -> new Point(x + 1, y); // Up -> Right
-            case 1 -> new Point(x, y + 1); // Right -> Down
-            case 2 -> new Point(x - 1, y); // Down -> Left
-            case 3 -> new Point(x, y - 1); // Left -> Up
-            default -> new Point(x, y);
+            case 0 -> new Point(agent.x + 1, agent.y);
+            case 1 -> new Point(agent.x, agent.y + 1);
+            case 2 -> new Point(agent.x - 1, agent.y);
+            case 3 -> new Point(agent.x, agent.y - 1);
+            default -> new Point(agent.x, agent.y);
         };
-    }
-
-    private char getCellContent(int x, int y, int time) {
-        if (x < 0 || x >= SIZE || y < 0 || y >= SIZE) return '#';
-        if (maze[y][x] != 'O') return maze[y][x];
-        return isObstacleFree(maze, x, y, time) ? '.' : 'O';
-    }
-
-    private void moveForward() {
-        Point front = getFrontCell();
-        if (front.x >= 0 && front.x < SIZE && front.y >= 0 && front.y < SIZE) {
-            agent.x = front.x;
-            agent.y = front.y;
-        }
     }
 
     private void turnLeft() {
@@ -353,10 +326,10 @@ public class MazeGame extends JFrame {
     }
 
     private void completeStep() {
-        pathHistory.add(new Point(agent.x, agent.y));
         stepCount++;
         time++;
         stepLabel.setText("Пройденных шагов: " + stepCount);
+        ((MazePanel) getContentPane().getComponent(1)).setTime(time);
         repaint();
     }
 
@@ -367,95 +340,12 @@ public class MazeGame extends JFrame {
     private void resetAgent() {
         agent.x = 30;
         agent.y = 1;
-        agent.direction = 1; // Down
-        justTurned = false;
+        agent.direction = 1;
     }
 
     private void toggleSimulation() {
-        if (isSimulationRunning) {
-            timer.stop();
-        } else {
-            timer.start();
-        }
+        if (isSimulationRunning) timer.stop();
+        else timer.start();
         isSimulationRunning = !isSimulationRunning;
-    }
-
-    class MazePanel extends JPanel {
-        @Override
-        protected void paintComponent(Graphics g) {
-            super.paintComponent(g);
-            for (int y = 0; y < SIZE; y++) {
-                for (int x = 0; x < SIZE; x++) {
-                    if (maze[y][x] == '#') {
-                        g.setColor(Color.BLACK);
-                        g.fillRect(x * CELL_SIZE, y * CELL_SIZE, CELL_SIZE, CELL_SIZE);
-                    } else if (maze[y][x] == 'G') {
-                        g.setColor(Color.GREEN);
-                        g.fillRect(x * CELL_SIZE, y * CELL_SIZE, CELL_SIZE, CELL_SIZE);
-                    } else if (maze[y][x] == 'O') {
-                        g.setColor(isObstacleFree(maze, x, y, time) ? Color.ORANGE : Color.RED);
-                        g.fillRect(x * CELL_SIZE, y * CELL_SIZE, CELL_SIZE, CELL_SIZE);
-                    } else {
-                        g.setColor(Color.WHITE);
-                        g.fillRect(x * CELL_SIZE, y * CELL_SIZE, CELL_SIZE, CELL_SIZE);
-                    }
-                }
-            }
-            g.setColor(Color.BLUE);
-            g.fillOval(agent.x * CELL_SIZE, agent.y * CELL_SIZE, CELL_SIZE, CELL_SIZE);
-            g.setColor(Color.YELLOW);
-            int cx = agent.x * CELL_SIZE + CELL_SIZE / 2;
-            int cy = agent.y * CELL_SIZE + CELL_SIZE / 2;
-            int dx = 0, dy = 0;
-            switch (agent.direction) {
-                case 0: dy = -CELL_SIZE / 2; break;
-                case 1: dx = CELL_SIZE / 2; break;
-                case 2: dy = CELL_SIZE / 2; break;
-                case 3: dx = -CELL_SIZE / 2; break;
-            }
-            g.drawLine(cx, cy, cx + dx, cy + dy);
-        }
-    }
-
-    static class Agent {
-        int x, y;
-        int direction;
-
-        Agent(int x, int y, int direction) {
-            this.x = x;
-            this.y = y;
-            this.direction = direction;
-        }
-    }
-
-    static class Obstacle {
-        int x, y, dx, dy;
-
-        Obstacle(int x, int y, int dx, int dy) {
-            this.x = x;
-            this.y = y;
-            this.dx = dx;
-            this.dy = dy;
-        }
-    }
-
-    static class Node {
-        int fScore, time;
-        Point pos;
-        List<Point> path;
-
-        Node(int fScore, int time, Point pos, List<Point> path) {
-            this.fScore = fScore;
-            this.time = time;
-            this.pos = pos;
-            this.path = path;
-        }
-    }
-
-    public static void main(String[] args) {
-        SwingUtilities.invokeLater(() -> {
-            MazeGame game = new MazeGame();
-            game.setVisible(true);
-        });
     }
 }
