@@ -56,12 +56,6 @@ public class Pathfinding {
         return (time % OBSTACLE_CYCLE) < (OBSTACLE_CYCLE / 2);
     }
 
-    public static char getCellContent(char[][] maze, int x, int y, int time) {
-        if (x < 0 || x >= SIZE || y < 0 || y >= SIZE) return '#';
-        if (maze[y][x] != 'O') return maze[y][x];
-        return isObstacleFree(maze, x, y, time) ? '.' : 'O';
-    }
-
     public static int getPathLengthWithTurns(List<Point> path) {
         if (path.size() < 2) return 0;
         int steps = path.size() - 1;

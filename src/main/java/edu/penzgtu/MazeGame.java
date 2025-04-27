@@ -1,351 +1,304 @@
 package edu.penzgtu;
 
-import edu.penzgtu.model.Agent;
-import edu.penzgtu.model.LeaderboardEntry;
+import edu.penzgtu.evolution.*;
 import edu.penzgtu.model.Obstacle;
 import edu.penzgtu.util.MazeGenerator;
-import edu.penzgtu.util.Pathfinding;
-import edu.penzgtu.view.ControlPanel;
 import edu.penzgtu.view.MazePanel;
+import org.jfree.chart.ChartFactory;
+import org.jfree.chart.ChartPanel;
+import org.jfree.chart.JFreeChart;
+import org.jfree.chart.plot.PlotOrientation;
+import org.jfree.data.xy.XYSeries;
+import org.jfree.data.xy.XYSeriesCollection;
 
 import javax.swing.*;
-import javax.swing.Timer;
 import java.awt.*;
-import java.util.*;
+import java.awt.event.ActionEvent;
+import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.CopyOnWriteArrayList;
 
-public class MazeGame extends JFrame {
-    private static final int SIZE = 32;
-    private static final int CELL_SIZE = 20;
-    private static final int MAX_STEPS = 200;
+public class MazeGame {
+    private static final int POP_SIZE = 50;
 
-    private static final int STATE_YELLOW = 0;
-    private static final int STATE_ORANGE = 1;
-    private static final int STATE_RED = 2;
-    private static final int CYCLE_LENGTH = 4;
+    private JFrame frame;
+    private MazeGenerator generator;
+    private MazePanel panel;
+    private EvolutionaryAlgorithm ea;
+    private Strategy bestStrategy;
+    private int generation;
+    private char[][] currentMaze;
+    private List<Obstacle> currentObstacles;
+    private Timer uiTimer;
+    private boolean isFirstRun = true;
 
-    private final char[][] maze;
-    private final Agent agent;
-    private final List<Obstacle> obstacles = new CopyOnWriteArrayList<>();
+    private JComboBox<String> algoBox;
+    private JLabel genLabel;
+    private JLabel fitnessLabel;
+    private JLabel stepsLabel;
+    private JLabel successLabel;
+    private JPanel chartPanelContainer;
+    private final List<Double> fitnessHistory = new ArrayList<>();
+    private final List<Integer> successHistory = new ArrayList<>();
 
-    private int stepCount = 0;
-    private int generation = 1;
-    private int wins = 0;
-    private int time = 0;
-
-    private final JLabel stepLabel;
-    private final JLabel goalLabel;
-    private final JLabel generationLabel;
-    private final JTextArea leaderboardArea;
-    private final List<LeaderboardEntry> leaderboard = new ArrayList<>();
-
-    private final Timer timer;
-    private boolean isSimulationRunning = false;
-
-    private final List<Point> pathHistory = new ArrayList<>();
-    private final Map<Integer, Set<Point>> deadEndRepeats = new HashMap<>();
-    private final Set<Point> deathPoints = new HashSet<>();
-    private boolean justTurned = false;
-    private final Map<Point, Integer> deathByTimeoutPoints = new HashMap<>();
-    private final Set<Point> forbiddenPoints = new HashSet<>();
-
-    public MazeGame() {
-        setTitle("Лабиринт с динамическими препятствиями");
-        setSize(SIZE * CELL_SIZE + 50, SIZE * CELL_SIZE + 250);
-        setDefaultCloseOperation(EXIT_ON_CLOSE);
-        setLocationRelativeTo(null);
-
-        MazeGenerator gen = new MazeGenerator();
-        maze = gen.generateValidMaze();
-        if (maze == null) throw new RuntimeException("Не удалось сгенерировать валидный лабиринт");
-
-        agent = new Agent(30, 1, 1);
-        obstacles.addAll(gen.getObstacles());
-
-        ControlPanel ctrl = new ControlPanel(this::performStep, this::toggleSimulation);
-        stepLabel = ctrl.getStepLabel();
-        goalLabel = ctrl.getGoalLabel();
-        generationLabel = ctrl.getGenerationLabel();
-        leaderboardArea = ctrl.getLeaderboardArea();
-
-        add(ctrl, BorderLayout.SOUTH);
-        add(new MazePanel(maze, agent), BorderLayout.CENTER);
-
-        timer = new Timer(100, e -> performStep());
-
-        updateWinPercentage();
+    public static void main(String[] args) {
+        SwingUtilities.invokeLater(() -> new MazeGame().createAndShowGUI());
     }
 
-    private void performStep() {
-        if (!isValidPosition(agent.x, agent.y)) {
-            advanceGeneration();
-            return;
-        }
+    private void createAndShowGUI() {
+        frame = new JFrame("Игра-лабиринт с эволюцией");
+        frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+        frame.setLayout(new BorderLayout());
 
-        int currState = getObstacleState(agent.x, agent.y, time);
-        if (currState == STATE_RED) {
-            deathPoints.add(new Point(agent.x, agent.y));
-            advanceGeneration();
-            return;
-        }
+        generator = new MazeGenerator();
+        currentMaze = generator.generateValidMaze();
+        currentObstacles = generator.getObstacles();
+        panel = new MazePanel(currentMaze);
+        panel.setObstacles(currentObstacles);
+        frame.add(panel, BorderLayout.CENTER);
 
-        if (stepCount >= MAX_STEPS) {
-            advanceGeneration();
-            return;
-        }
+        chartPanelContainer = new JPanel();
+        chartPanelContainer.setLayout(new BorderLayout());
+        frame.add(chartPanelContainer, BorderLayout.EAST);
 
-        if (isGoalReached()) {
-            advanceGeneration(true);
-            return;
-        }
+        JPanel control = new JPanel();
+        algoBox = new JComboBox<>(new String[]{"Генетический алгоритм", "Эволюционная стратегия", "Метод отжига"});
+        JButton initButton = new JButton("Инициализировать");
+        JButton nextGenButton = new JButton("Следующее поколение");
+        JButton newMazeButton = new JButton("Новый лабиринт");
+        JButton stepButton = new JButton("Шаг");
+        JButton runPauseButton = new JButton("Запуск/Пауза");
+        JButton instantRunButton = new JButton("Мгновенное прохождение");
+        control.add(new JLabel("Алгоритм:"));
+        control.add(algoBox);
+        control.add(initButton);
+        control.add(nextGenButton);
+        control.add(newMazeButton);
+        control.add(stepButton);
+        control.add(runPauseButton);
+        control.add(instantRunButton);
+        frame.add(control, BorderLayout.NORTH);
 
-        Point here = new Point(agent.x, agent.y);
-        if (!justTurned && (pathHistory.isEmpty() || !pathHistory.get(pathHistory.size() - 1).equals(here))) {
-            pathHistory.add(here);
-        }
+        JPanel status = new JPanel();
+        genLabel = new JLabel("Поколение: 0");
+        fitnessLabel = new JLabel("Фитнес: N/A");
+        stepsLabel = new JLabel("Шагов: 0");
+        successLabel = new JLabel("Статус: Ожидание");
+        status.add(genLabel);
+        status.add(fitnessLabel);
+        status.add(stepsLabel);
+        status.add(successLabel);
+        frame.add(status, BorderLayout.SOUTH);
 
-        Point front = getFrontCell();
-        Point right = getRightCell();
+        initButton.addActionListener(this::onInitialize);
+        nextGenButton.addActionListener(this::onNextGeneration);
+        newMazeButton.addActionListener(e -> onNewMaze());
+        stepButton.addActionListener(e -> onStep());
+        runPauseButton.addActionListener(e -> onRunPause());
+        instantRunButton.addActionListener(e -> onInstantRun());
 
-        if (isWallOrBlocked(front)) {
-            if (isWallOrBlocked(right)) {
-                int attempts = 0;
-                while (isWallOrBlocked(getFrontCell()) && attempts < 4) {
-                    turnLeft();
-                    attempts++;
-                }
-                if (attempts >= 4) {
-                    advanceGeneration();
-                    return;
-                }
-            } else {
-                turnRight();
-            }
-            justTurned = true;
-            completeStep();
-            return;
-        }
+        onNewMaze();
 
-        int frontState = getObstacleState(front.x, front.y, time);
-        if (frontState != -1) {
-            if (frontState == STATE_YELLOW) {
-                agent.x = front.x;
-                agent.y = front.y;
-                justTurned = false;
-            } else {
-                justTurned = true;
-            }
-            completeStep();
-            return;
-        }
-
-        if (shouldAvoid(front) || deathPoints.contains(front)) {
-            turnRight();
-            justTurned = true;
-            completeStep();
-            return;
-        }
-
-        char content = Pathfinding.getCellContent(maze, front.x, front.y, time);
-        switch (content) {
-            case 'G':
-                agent.x = front.x;
-                agent.y = front.y;
-                justTurned = false;
-                completeStep();
-                break;
-            case '.':
-                agent.x = front.x;
-                agent.y = front.y;
-                justTurned = false;
-
-                right = getRightCell();
-                if (isValidPosition(right.x, right.y)) {
-                    char rc = Pathfinding.getCellContent(maze, right.x, right.y, time);
-                    if ((rc == '.' || rc == 'G') && !shouldAvoid(right) && !deathPoints.contains(right)) {
-                        turnRight();
-                        justTurned = true;
-                    }
-                }
-                completeStep();
-                break;
-            default:
-                completeStep();
-        }
+        frame.pack();
+        frame.setVisible(true);
     }
 
-    private boolean shouldAvoid(Point p) {
-        if (forbiddenPoints.contains(p)) return true;
-        for (Map.Entry<Integer, Set<Point>> e : deadEndRepeats.entrySet()) {
-            if (e.getKey() >= generation) continue;
-            if (e.getValue().contains(p)) {
-                return true;
-            }
+    private void onInitialize(ActionEvent e) {
+        switch (algoBox.getSelectedIndex()) {
+            case 0: ea = new GeneticAlgorithm(); break;
+            case 1: ea = new EvolutionStrategy(); break;
+            default: ea = new SimulatedAnnealing();
         }
-        return false;
+        ea.initialize(POP_SIZE);
+        generation = 0;
+        bestStrategy = null;
+        genLabel.setText("Поколение: 0");
+        fitnessLabel.setText("Фитнес: N/A");
+        stepsLabel.setText("Шагов: 0");
+        successLabel.setText("Статус: Ожидание");
+        panel.resetSimulation();
+        resetChart();
     }
 
-    private boolean isWallOrBlocked(Point p) {
-        if (!isValidPosition(p.x, p.y)) return true;
-        char c = maze[p.y][p.x];
-        return c == '#' || shouldAvoid(p) || deathPoints.contains(p);
+    private void resetChart() {
+        fitnessHistory.clear();
+        successHistory.clear();
+        updateChart();
     }
 
-    private boolean isValidPosition(int x, int y) {
-        return x >= 0 && x < SIZE && y >= 0 && y < SIZE;
-    }
-
-    private void advanceGeneration() {
-        advanceGeneration(false);
-    }
-
-    private void advanceGeneration(boolean won) {
-        if (!won && stepCount >= MAX_STEPS) {
-            Point deathPoint = new Point(agent.x, agent.y);
-            deathByTimeoutPoints.merge(deathPoint, 1, Integer::sum);
-            if (deathByTimeoutPoints.get(deathPoint) >= 3) {
-                addForbiddenArea(deathPoint);
-            }
+    private void onNextGeneration(ActionEvent e) {
+        if (ea == null) {
+            JOptionPane.showMessageDialog(frame, "Сначала инициализируйте алгоритм");
+            return;
         }
+        stopUiTimer();
+        ea.evaluate(generator);
+        bestStrategy = ea.getBest().getStrategy();
+        double fitness = ea.getBest().getFitness();
 
-        if (won) {
-            wins++;
-            boolean alreadyExists = leaderboard.stream()
-                    .anyMatch(entry -> entry.steps() == stepCount);
+        panel.setMaze(currentMaze);
+        panel.setObstacles(currentObstacles);
+        panel.resetSimulation();
+        stepsLabel.setText("Шагов: 0");
 
-            if (!alreadyExists) {
-                leaderboard.add(new LeaderboardEntry(generation, stepCount));
-                updateLeaderboard();
-            }
-        }
+        fitnessHistory.add(fitness);
+        successHistory.add(0);
 
-        recordDeadEnds();
+        fitnessLabel.setText(String.format("Фитнес: %.2f", fitness));
+        updateChart();
+
+        ea.evolve();
         generation++;
-        resetForNext();
-        updateWinPercentage();
+        genLabel.setText("Поколение: " + generation);
+        successLabel.setText("Статус: Ожидание");
+
+        startUiTimer();
     }
 
-    private void addForbiddenArea(Point center) {
-        for (int dx = -1; dx <= 1; dx++) {
-            for (int dy = -1; dy <= 1; dy++) {
-                int newX = center.x + dx;
-                int newY = center.y + dy;
-                if (isValidPosition(newX, newY)) {
-                    forbiddenPoints.add(new Point(newX, newY));
-                }
+    private void onNewMaze() {
+        stopUiTimer();
+        currentMaze = generator.generateValidMaze();
+        currentObstacles = generator.getObstacles();
+        panel.setMaze(currentMaze);
+        panel.setObstacles(currentObstacles);
+        panel.resetSimulation();
+        stepsLabel.setText("Шагов: 0");
+        successLabel.setText("Статус: Ожидание");
+        fitnessHistory.clear();
+        successHistory.clear();
+        updateChart();
+    }
+
+    private void onStep() {
+        if (bestStrategy == null) {
+            JOptionPane.showMessageDialog(frame, "Сначала выполните следующее поколение");
+            return;
+        }
+        if (panel.isDead() || panel.isGoalReached()) {
+            JOptionPane.showMessageDialog(frame, panel.isDead() ? "Агент погиб на красном препятствии" : "Цель достигнута");
+            return;
+        }
+        panel.stepStrategy(bestStrategy);
+        stepsLabel.setText("Шагов: " + panel.getSteps());
+        checkSuccess();
+        updateSuccessHistory();
+    }
+
+    private void onRunPause() {
+        if (bestStrategy == null) {
+            JOptionPane.showMessageDialog(frame, "Сначала выполните следующее поколение");
+            return;
+        }
+        if (panel.isDead() || panel.isGoalReached()) {
+            return;
+        }
+        if (uiTimer != null && uiTimer.isRunning()) {
+            stopUiTimer();
+        } else {
+            startUiTimer();
+        }
+    }
+
+    private void onInstantRun() {
+        if (bestStrategy == null) {
+            JOptionPane.showMessageDialog(frame, "Сначала выполните следующее поколение");
+            return;
+        }
+        if (panel.isDead() || panel.isGoalReached()) {
+            JOptionPane.showMessageDialog(frame, panel.isDead() ? "Агент погиб на красном препятствии" : "Цель достигнута");
+            return;
+        }
+        panel.simulateStrategy(bestStrategy);
+        stepsLabel.setText("Шагов: " + panel.getSteps());
+        checkSuccess();
+        updateSuccessHistory();
+    }
+
+    private void startUiTimer() {
+        if (uiTimer != null) uiTimer.stop();
+        uiTimer = new Timer(100, ev -> {
+            if (panel.isDead() || panel.isGoalReached()) {
+                stopUiTimer();
+            } else {
+                panel.stepStrategy(bestStrategy);
+                stepsLabel.setText("Шагов: " + panel.getSteps());
+            }
+            checkSuccess();
+            updateSuccessHistory();
+        });
+        uiTimer.start();
+    }
+
+    private void stopUiTimer() {
+        if (uiTimer != null) uiTimer.stop();
+    }
+
+    private void checkSuccess() {
+        if (panel.isGoalReached()) {
+            successLabel.setText("Статус: Успех!");
+            stopUiTimer();
+        } else if (panel.isDead()) {
+            successLabel.setText("Статус: Неудача (агент погиб)");
+            stopUiTimer();
+        } else {
+            successLabel.setText("Статус: Ожидание");
+        }
+    }
+
+    private void updateSuccessHistory() {
+        if (!successHistory.isEmpty()) {
+            successHistory.set(successHistory.size() - 1, panel.isGoalReached() ? 1 : 0);
+            updateChart();
+        }
+    }
+
+    private void updateChart() {
+        XYSeriesCollection dataset = getSeriesCollection();
+
+        JFreeChart chart = ChartFactory.createXYLineChart(
+                "Зависимость побед от фитнеса",
+                "Поколение",
+                "Фитнес",
+                dataset,
+                PlotOrientation.VERTICAL,
+                true,
+                true,
+                false
+        );
+
+        chart.getXYPlot().getRenderer().setSeriesPaint(0, Color.BLUE);
+        chart.getXYPlot().getRenderer().setSeriesPaint(1, Color.RED);
+
+        if (chartPanelContainer.getComponentCount() > 0) {
+            chartPanelContainer.removeAll();
+        }
+
+        ChartPanel chartPanel = new ChartPanel(chart);
+        chartPanel.setPreferredSize(new Dimension(500, 300));
+        chartPanelContainer.add(chartPanel, BorderLayout.CENTER);
+        chartPanelContainer.revalidate();
+        chartPanelContainer.repaint();
+
+        if (isFirstRun) {
+            frame.setSize(frame.getWidth() + 250, frame.getHeight());
+            isFirstRun = false;
+        }
+    }
+
+    private XYSeriesCollection getSeriesCollection() {
+        XYSeries fitnessSuccessSeries = new XYSeries("Фитнес - Победа");
+        XYSeries fitnessFailureSeries = new XYSeries("Фитнес - Поражение");
+
+        for (int i = 0; i < fitnessHistory.size(); i++) {
+            if (successHistory.get(i) == 1) {
+                fitnessSuccessSeries.add(i, fitnessHistory.get(i));
+            } else {
+                fitnessFailureSeries.add(i, fitnessHistory.get(i));
             }
         }
-    }
 
-    private void updateLeaderboard() {
-        leaderboard.sort(Comparator.comparingInt(LeaderboardEntry::steps));
-        StringBuilder sb = new StringBuilder();
-        sb.append("Таблица лидеров:\n");
-        for (LeaderboardEntry entry : leaderboard) {
-            sb.append("Поколение: ").append(entry.generation()).append(" - Шаги: ").append(entry.steps()).append("\n");
-        }
-        leaderboardArea.setText(sb.toString());
-    }
-
-
-    private int getObstacleState(int x, int y, int t) {
-        for (Obstacle o : obstacles) {
-            if (o.getX() == x && o.getY() == y) {
-                int cycle = t % CYCLE_LENGTH;
-                if (cycle < 2) return STATE_YELLOW;
-                if (cycle == 2) return STATE_ORANGE;
-                return STATE_RED;
-            }
-        }
-        return -1;
-    }
-
-    private void recordDeadEnds() {
-        if (deadEndRepeats.containsKey(generation)) return;
-        Set<Point> repeats = new HashSet<>();
-        Map<Point, Integer> counts = new HashMap<>();
-
-        for (Point p : pathHistory) {
-            int count = counts.getOrDefault(p, 0) + 1;
-            counts.put(p, count);
-            if (count >= 2) {
-                repeats.add(p);
-            }
-        }
-
-        if (!repeats.isEmpty()) {
-            deadEndRepeats.put(generation, repeats);
-        }
-    }
-
-    private void resetForNext() {
-        generationLabel.setText("Поколение: " + generation);
-        stepCount = time = 0;
-        stepLabel.setText("Пройденных шагов: 0");
-        resetAgent();
-        pathHistory.clear();
-        justTurned = false;
-        deathPoints.clear();
-    }
-
-    private void updateWinPercentage() {
-        int completedGenerations = generation - 1;
-        if (completedGenerations != 0) {
-            double percentage = (double) wins / completedGenerations * 100.0;
-            goalLabel.setText(String.format("Процент побед: %.2f%%", percentage));
-        }
-    }
-
-    private Point getFrontCell() {
-        return switch (agent.direction) {
-            case 0 -> new Point(agent.x, agent.y - 1);
-            case 1 -> new Point(agent.x + 1, agent.y);
-            case 2 -> new Point(agent.x, agent.y + 1);
-            case 3 -> new Point(agent.x - 1, agent.y);
-            default -> new Point(agent.x, agent.y);
-        };
-    }
-
-    private Point getRightCell() {
-        return switch (agent.direction) {
-            case 0 -> new Point(agent.x + 1, agent.y);
-            case 1 -> new Point(agent.x, agent.y + 1);
-            case 2 -> new Point(agent.x - 1, agent.y);
-            case 3 -> new Point(agent.x, agent.y - 1);
-            default -> new Point(agent.x, agent.y);
-        };
-    }
-
-    private void turnLeft() {
-        agent.direction = (agent.direction + 3) % 4;
-    }
-
-    private void turnRight() {
-        agent.direction = (agent.direction + 1) % 4;
-    }
-
-    private void completeStep() {
-        stepCount++;
-        time++;
-        stepLabel.setText("Пройденных шагов: " + stepCount);
-        ((MazePanel) getContentPane().getComponent(1)).setTime(time);
-        repaint();
-    }
-
-    private boolean isGoalReached() {
-        return maze[agent.y][agent.x] == 'G';
-    }
-
-    private void resetAgent() {
-        agent.x = 30;
-        agent.y = 1;
-        agent.direction = 1;
-    }
-
-    private void toggleSimulation() {
-        if (isSimulationRunning) timer.stop();
-        else timer.start();
-        isSimulationRunning = !isSimulationRunning;
+        XYSeriesCollection dataset = new XYSeriesCollection();
+        dataset.addSeries(fitnessSuccessSeries);
+        dataset.addSeries(fitnessFailureSeries);
+        return dataset;
     }
 }
